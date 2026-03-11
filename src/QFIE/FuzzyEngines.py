@@ -72,6 +72,19 @@ def trapmf(x, abcd):
 
     return y
 
+def bellmf(x, a, b, c):
+    """Generalized bell membership function.
+    
+    Parameters
+    ----------
+    x : np.ndarray – universe of discourse
+    a, b, c : float – shape and center parameters
+    
+    Returns
+    -------
+    np.ndarray : membership values (0..1)
+    """
+    return 1 / (1 + np.abs((x - c)/a) ** (2*b))
 
 # ---------------------------------------------------------------------------
 # QuantumFuzzyEngine
