@@ -31,6 +31,19 @@ import os
 sys.path.append(os.path.join(os.path.dirname(__file__), "src"))
 
 import numpy as np
+# Use a non-GUI backend by default on Windows/terminal runs to avoid
+# Tkinter deallocation errors at interpreter shutdown.
+import matplotlib
+
+
+def _env_flag(name, default="0"):
+    return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
+
+
+SHOW_PLOTS = _env_flag("CANCER_SHOW_PLOTS", "0")
+if not SHOW_PLOTS:
+    matplotlib.use("Agg")
+
 import matplotlib.pyplot as plt
 from QFIE.FuzzyEngines import QuantumFuzzyEngine, trimf, trapmf
 
@@ -45,12 +58,13 @@ PARAMS = {
     'l': 0.4770,        # Rate cells stop multiplying (day⁻¹)
     'x': 0.050,         # Rate Q cells change into P cells (day⁻¹)
     'sigma': 0.10,      # Speed at which normal cells grow (day⁻¹)
-    'N': 1e7,           # Normal cells' holding capacity
+    'N': 1e9,           # Normal cells' holding capacity
     'P0': 2e11,         # Initial population of P cells
     'Q0': 8e11,         # Initial population of Q cells
-    'Y0': 1e6,          # Initial population of normal cells
+    'Y0': 1e8,          # Initial population of normal cells
+    'Y_MIN': 1e6,       # Lower safe bound for normal cells
     'theta': 0.270,     # Decay of drugs (day⁻¹)
-    'a': 8.40e5,        # Cell death rate per unit drug conc (day⁻¹)
+    'a': 8.40e-3,       # Cell death rate per unit drug conc (day⁻¹)
     'beta': 0.40,       # Rate of removing toxins
 }
 
@@ -75,9 +89,16 @@ SET_POINTS = {
 # Drug concentration bounds
 D_MIN = 0.0
 D_MAX = 50.0
+THERAPEUTIC_D_MIN = 10.0
+
+# Drug dosage bound (controller output)
+DOSAGE_MAX = 15.0
 
 # Toxicity bound
 T_MAX = 100.0
+
+# Normal-cell safety bound
+Y_MIN_SAFE = PARAMS['Y_MIN']
 
 # Simulation
 SIM_DAYS = 100          # Total treatment duration (days)
@@ -110,6 +131,7 @@ class CancerPatientModel:
         self.a = p['a']
         self.theta = p['theta']
         self.beta = p['beta']
+        self.y_min = p.get('Y_MIN', 0.0)
 
         # Initial conditions
         self.P = p['P0']
@@ -155,7 +177,7 @@ class CancerPatientModel:
         self.Q = max(0, Q + dQ * dt)
         self.D = np.clip(D + dD * dt, D_MIN, D_MAX)
         self.T = np.clip(T + dT * dt, 0, T_MAX)
-        self.Y = max(0, Y + dY * dt)
+        self.Y = np.clip(Y + dY * dt, 0, self.N)
 
         return self.D
 
@@ -182,8 +204,8 @@ class QuantumFuzzyPIController:
         # Integral of error (accumulated over time)
         self.integral_universe = np.linspace(-50, 50, 200)    # mg·day/ml
 
-        # Drug dosage output (control signal u)
-        self.dosage_universe = np.linspace(0, 15, 200)        # mg Day⁻¹/ml
+        # Fuzzy output is a dosage adjustment around the equilibrium dose.
+        self.dosage_universe = np.linspace(-4, 4, 200)        # mg Day⁻¹/ml
 
         self.qfie.input_variable("error", self.error_universe)
         self.qfie.input_variable("integral", self.integral_universe)
@@ -209,13 +231,13 @@ class QuantumFuzzyPIController:
             trapmf(self.integral_universe, [8, 25, 50, 50]),      # PB
         ]
 
-        # Drug dosage: VL (very low), LO (low), ME (medium), HI (high), VH (very high)
+        # Dosage adjustment: NB, NS, ZE, PS, PB
         dosage_sets = [
-            trapmf(self.dosage_universe, [0, 0, 1.5, 3]),        # VL
-            trimf(self.dosage_universe,  [1.5, 3.75, 6]),        # LO
-            trimf(self.dosage_universe,  [4.5, 7.5, 10.5]),      # ME
-            trimf(self.dosage_universe,  [9, 11.25, 13.5]),      # HI
-            trapmf(self.dosage_universe, [12, 13.5, 15, 15]),    # VH
+            trapmf(self.dosage_universe, [-4, -4, -2.4, -1.2]),     # NB
+            trimf(self.dosage_universe,  [-2.0, -1.0, 0.0]),         # NS
+            trimf(self.dosage_universe,  [-0.5, 0.0, 0.5]),          # ZE
+            trimf(self.dosage_universe,  [0.0, 1.0, 2.0]),           # PS
+            trapmf(self.dosage_universe, [1.2, 2.4, 4, 4]),          # PB
         ]
 
         self.qfie.add_input_fuzzysets(
@@ -225,62 +247,62 @@ class QuantumFuzzyPIController:
             "integral", ["NB", "NS", "ZE", "PS", "PB"], integral_sets
         )
         self.qfie.add_output_fuzzysets(
-            "dosage", ["VL", "LO", "ME", "HI", "VH"], dosage_sets
+            "dosage", ["NB", "NS", "ZE", "PS", "PB"], dosage_sets
         )
 
-        # ── Rule Base (25 rules — full PI coverage) ─────────────────
+        # ── Rule Base (25 rules — fuzzy PI on delta-dose) ───────────
         # Rows = error, Cols = integral
-        # Convention: positive error → drug is too low → need more drug
+        # Convention: positive error => concentration is below target => increase dose.
         #
         #              integral:  NB     NS     ZE     PS     PB
-        # error NB:              VL     VL     VL     LO     LO
-        # error NS:              VL     LO     LO     ME     ME
-        # error ZE:              LO     ME     ME     ME     HI
-        # error PS:              ME     ME     HI     HI     VH
-        # error PB:              HI     HI     VH     VH     VH
+        # error NB:              NB     NB     NB     NS     ZE
+        # error NS:              NB     NS     NS     ZE     PS
+        # error ZE:              NB     NS     ZE     PS     PB
+        # error PS:              NS     ZE     PS     PS     PB
+        # error PB:              ZE     PS     PB     PB     PB
 
         rules = [
-            # error NB (drug far above target → reduce dose significantly)
-            'if error is NB and integral is NB then dosage is VL',
-            'if error is NB and integral is NS then dosage is VL',
-            'if error is NB and integral is ZE then dosage is VL',
-            'if error is NB and integral is PS then dosage is LO',
-            'if error is NB and integral is PB then dosage is LO',
+            # error NB (drug far above target -> decrease dose)
+            'if error is NB and integral is NB then dosage is NB',
+            'if error is NB and integral is NS then dosage is NB',
+            'if error is NB and integral is ZE then dosage is NB',
+            'if error is NB and integral is PS then dosage is NS',
+            'if error is NB and integral is PB then dosage is ZE',
 
             # error NS (drug slightly above target)
-            'if error is NS and integral is NB then dosage is VL',
-            'if error is NS and integral is NS then dosage is LO',
-            'if error is NS and integral is ZE then dosage is LO',
-            'if error is NS and integral is PS then dosage is ME',
-            'if error is NS and integral is PB then dosage is ME',
+            'if error is NS and integral is NB then dosage is NB',
+            'if error is NS and integral is NS then dosage is NS',
+            'if error is NS and integral is ZE then dosage is NS',
+            'if error is NS and integral is PS then dosage is ZE',
+            'if error is NS and integral is PB then dosage is PS',
 
-            # error ZE (drug at target — maintain)
-            'if error is ZE and integral is NB then dosage is LO',
-            'if error is ZE and integral is NS then dosage is ME',
-            'if error is ZE and integral is ZE then dosage is ME',
-            'if error is ZE and integral is PS then dosage is ME',
-            'if error is ZE and integral is PB then dosage is HI',
+            # error ZE (near target)
+            'if error is ZE and integral is NB then dosage is NB',
+            'if error is ZE and integral is NS then dosage is NS',
+            'if error is ZE and integral is ZE then dosage is ZE',
+            'if error is ZE and integral is PS then dosage is PS',
+            'if error is ZE and integral is PB then dosage is PB',
 
             # error PS (drug slightly below target → increase dose)
-            'if error is PS and integral is NB then dosage is ME',
-            'if error is PS and integral is NS then dosage is ME',
-            'if error is PS and integral is ZE then dosage is HI',
-            'if error is PS and integral is PS then dosage is HI',
-            'if error is PS and integral is PB then dosage is VH',
+            'if error is PS and integral is NB then dosage is NS',
+            'if error is PS and integral is NS then dosage is ZE',
+            'if error is PS and integral is ZE then dosage is PS',
+            'if error is PS and integral is PS then dosage is PS',
+            'if error is PS and integral is PB then dosage is PB',
 
             # error PB (drug far below target → increase dose strongly)
-            'if error is PB and integral is NB then dosage is HI',
-            'if error is PB and integral is NS then dosage is HI',
-            'if error is PB and integral is ZE then dosage is VH',
-            'if error is PB and integral is PS then dosage is VH',
-            'if error is PB and integral is PB then dosage is VH',
+            'if error is PB and integral is NB then dosage is ZE',
+            'if error is PB and integral is NS then dosage is PS',
+            'if error is PB and integral is ZE then dosage is PB',
+            'if error is PB and integral is PS then dosage is PB',
+            'if error is PB and integral is PB then dosage is PB',
         ]
         self.qfie.set_rules(rules)
 
         # PI state
         self.integral_error = 0.0
 
-    def compute_dosage(self, error, dt):
+    def compute_dosage(self, error, set_point, dt):
         """Compute drug dosage given current error and time step.
 
         Parameters
@@ -294,10 +316,11 @@ class QuantumFuzzyPIController:
         """
         # Accumulate integral
         self.integral_error += error * dt
+        self.integral_error = float(np.clip(self.integral_error, -50, 50))
 
         # Clip inputs to universe bounds
         safe_error = float(np.clip(error, -15, 15))
-        safe_integral = float(np.clip(self.integral_error, -50, 50))
+        safe_integral = self.integral_error
 
         crisp_inputs = {
             'error': safe_error,
@@ -305,10 +328,14 @@ class QuantumFuzzyPIController:
         }
 
         self.qfie.build_inference_qc(crisp_inputs, draw_qc=False, distributed=False)
-        dosage, _ = self.qfie.execute(n_shots=1024)
+        delta_dose, _ = self.qfie.execute(n_shots=1024)
+
+        # dD/dt = u - theta*D => equilibrium feedforward u_eq = theta * D_ref
+        u_eq = PARAMS['theta'] * set_point
+        dosage = u_eq + float(delta_dose)
 
         # Ensure dosage is non-negative and within drug bounds (Eq. 5)
-        dosage = float(np.clip(dosage, 0, 15))
+        dosage = float(np.clip(dosage, 0, DOSAGE_MAX))
         return dosage
 
     def reset(self):
@@ -330,6 +357,12 @@ def run_quantum_fuzzy_pi_simulation(set_point_name='S1', days=SIM_DAYS, dt=DT):
     dt   : float — time step (days)
     """
     set_point = SET_POINTS[set_point_name]
+    if not (THERAPEUTIC_D_MIN <= set_point <= D_MAX):
+        raise ValueError(
+            f"Set point {set_point:.2f} mg/ml must be in "
+            f"[{THERAPEUTIC_D_MIN:.2f}, {D_MAX:.2f}] mg/ml."
+        )
+
     steps = int(days / dt)
 
     print(f"\n{'='*65}")
@@ -354,6 +387,9 @@ def run_quantum_fuzzy_pi_simulation(set_point_name='S1', days=SIM_DAYS, dt=DT):
     q_cells = np.zeros(steps)
     y_cells = np.zeros(steps)
     errors = np.zeros(steps)
+    in_therapeutic_band = np.zeros(steps, dtype=bool)
+    toxicity_violation = np.zeros(steps, dtype=bool)
+    y_safety_violation = np.zeros(steps, dtype=bool)
 
     for t in range(steps):
         time_axis[t] = t * dt
@@ -363,7 +399,7 @@ def run_quantum_fuzzy_pi_simulation(set_point_name='S1', days=SIM_DAYS, dt=DT):
         errors[t] = error
 
         # Controller output
-        u = controller.compute_dosage(error, dt)
+        u = controller.compute_dosage(error, set_point, dt)
 
         # Advance plant
         model.step(u, dt)
@@ -375,6 +411,9 @@ def run_quantum_fuzzy_pi_simulation(set_point_name='S1', days=SIM_DAYS, dt=DT):
         p_cells[t] = model.P
         q_cells[t] = model.Q
         y_cells[t] = model.Y
+        in_therapeutic_band[t] = THERAPEUTIC_D_MIN <= model.D <= D_MAX
+        toxicity_violation[t] = model.T > T_MAX
+        y_safety_violation[t] = model.Y < Y_MIN_SAFE
 
         if t % 50 == 0:
             print(
@@ -387,6 +426,9 @@ def run_quantum_fuzzy_pi_simulation(set_point_name='S1', days=SIM_DAYS, dt=DT):
         'time': time_axis, 'drug_conc': drug_conc, 'drug_dose': drug_dose,
         'toxicity': toxicity, 'p_cells': p_cells, 'q_cells': q_cells,
         'y_cells': y_cells, 'errors': errors, 'set_point': set_point,
+        'in_therapeutic_band': in_therapeutic_band,
+        'toxicity_violation': toxicity_violation,
+        'y_safety_violation': y_safety_violation,
         'set_point_name': set_point_name,
     }
 
@@ -394,75 +436,99 @@ def run_quantum_fuzzy_pi_simulation(set_point_name='S1', days=SIM_DAYS, dt=DT):
 
 
 def plot_simulation(results, save_prefix="cancer_pi_controller_quantum"):
-    """Generate plots for a single simulation run."""
+    """Generate linear and log-scale plots for a single simulation run."""
     t = results['time']
     sp = results['set_point']
     sp_name = results['set_point_name']
 
-    fig, axes = plt.subplots(3, 2, figsize=(16, 14))
+    def _make_figure(log_cells=False):
+        fig, axes = plt.subplots(3, 2, figsize=(16, 14))
 
-    # (0,0) Drug Concentration
-    ax = axes[0, 0]
-    ax.plot(t, results['drug_conc'], linewidth=2, color='royalblue')
-    ax.axhline(sp, color='red', linestyle='--', alpha=0.7, label=f'Set point = {sp}')
-    ax.set_title(f"Drug Concentration D(t) — {sp_name}")
-    ax.set_ylabel("D (mg/ml)")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
+        # (0,0) Drug Concentration
+        ax = axes[0, 0]
+        ax.plot(t, results['drug_conc'], linewidth=2, color='royalblue')
+        ax.axhline(sp, color='red', linestyle='--', alpha=0.7, label=f'Set point = {sp}')
+        ax.set_title(f"Drug Concentration D(t) — {sp_name}")
+        ax.set_ylabel("D (mg/ml)")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
 
-    # (0,1) Drug Dose (Control Signal)
-    ax = axes[0, 1]
-    ax.plot(t, results['drug_dose'], linewidth=2, color='seagreen')
-    ax.set_title("Drug Dose u(t) — Control Signal")
-    ax.set_ylabel("u (mg Day⁻¹/ml)")
-    ax.grid(True, alpha=0.3)
+        # (0,1) Drug Dose (Control Signal)
+        ax = axes[0, 1]
+        ax.plot(t, results['drug_dose'], linewidth=2, color='seagreen')
+        ax.set_title("Drug Dose u(t) — Control Signal")
+        ax.set_ylabel("u (mg Day⁻¹/ml)")
+        ax.grid(True, alpha=0.3)
 
-    # (1,0) Toxicity
-    ax = axes[1, 0]
-    ax.plot(t, results['toxicity'], linewidth=2, color='darkorange')
-    ax.axhline(T_MAX, color='red', linestyle='--', alpha=0.5, label=f'Tmax = {T_MAX}')
-    ax.set_title("Toxicity Level T(t)")
-    ax.set_ylabel("T (mg Day⁻¹/ml)")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
+        # (1,0) Toxicity
+        ax = axes[1, 0]
+        ax.plot(t, results['toxicity'], linewidth=2, color='darkorange')
+        ax.axhline(T_MAX, color='red', linestyle='--', alpha=0.5, label=f'Tmax = {T_MAX}')
+        ax.set_title("Toxicity Level T(t)")
+        ax.set_ylabel("T (mg Day⁻¹/ml)")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
 
-    # (1,1) Error
-    ax = axes[1, 1]
-    ax.plot(t, results['errors'], linewidth=2, color='crimson')
-    ax.axhline(0, color='black', linestyle=':', alpha=0.4)
-    ax.set_title("Tracking Error (Set Point − D)")
-    ax.set_ylabel("Error (mg/ml)")
-    ax.grid(True, alpha=0.3)
+        # (1,1) Error
+        ax = axes[1, 1]
+        ax.plot(t, results['errors'], linewidth=2, color='crimson')
+        ax.axhline(0, color='black', linestyle=':', alpha=0.4)
+        ax.set_title("Tracking Error (Set Point − D)")
+        ax.set_ylabel("Error (mg/ml)")
+        ax.grid(True, alpha=0.3)
 
-    # (2,0) Proliferating & Quiescent Cells
-    ax = axes[2, 0]
-    ax.plot(t, results['p_cells'], linewidth=2, label='P cells', color='crimson')
-    ax.plot(t, results['q_cells'], linewidth=2, label='Q cells', color='mediumblue', linestyle='--')
-    ax.set_title("Cancer Cell Populations")
-    ax.set_ylabel("Cell Count")
-    ax.set_xlabel("Time (days)")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    ax.ticklabel_format(style='scientific', axis='y', scilimits=(0, 0))
+        # (2,0) Proliferating & Quiescent Cells
+        ax = axes[2, 0]
+        p_vals = np.maximum(results['p_cells'], 1.0) if log_cells else results['p_cells']
+        q_vals = np.maximum(results['q_cells'], 1.0) if log_cells else results['q_cells']
+        ax.plot(t, p_vals, linewidth=2, label='P cells', color='crimson')
+        ax.plot(t, q_vals, linewidth=2, label='Q cells', color='mediumblue', linestyle='--')
+        ax.set_title("Cancer Cell Populations")
+        ax.set_ylabel("Cell Count")
+        ax.set_xlabel("Time (days)")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        if log_cells:
+            ax.set_yscale('log')
+        else:
+            ax.ticklabel_format(style='scientific', axis='y', scilimits=(0, 0))
 
-    # (2,1) Normal Y Cells
-    ax = axes[2, 1]
-    ax.plot(t, results['y_cells'], linewidth=2, color='forestgreen')
-    ax.set_title("Normal Cell Count Y(t)")
-    ax.set_ylabel("Y cells")
-    ax.set_xlabel("Time (days)")
-    ax.grid(True, alpha=0.3)
-    ax.ticklabel_format(style='scientific', axis='y', scilimits=(0, 0))
+        # (2,1) Normal Y Cells
+        ax = axes[2, 1]
+        y_vals = np.maximum(results['y_cells'], 1.0) if log_cells else results['y_cells']
+        ax.plot(t, y_vals, linewidth=2, color='forestgreen')
+        ax.set_title("Normal Cell Count Y(t)")
+        ax.set_ylabel("Y cells")
+        ax.set_xlabel("Time (days)")
+        ax.grid(True, alpha=0.3)
+        if log_cells:
+            ax.set_yscale('log')
+        else:
+            ax.ticklabel_format(style='scientific', axis='y', scilimits=(0, 0))
 
-    fig.suptitle(
-        f"Cancer Drug Delivery — Quantum Fuzzy PI Controller ({sp_name}: {sp} mg/ml)",
-        fontsize=14, fontweight='bold',
-    )
-    plt.tight_layout()
-    fname = f"{save_prefix}_{sp_name}.png"
-    plt.savefig(fname, dpi=150)
-    print(f"\nPlot saved to {fname}")
-    plt.show()
+        scale_label = "log-cell" if log_cells else "linear"
+        fig.suptitle(
+            f"Cancer Drug Delivery — Quantum Fuzzy PI Controller ({sp_name}: {sp} mg/ml, {scale_label})",
+            fontsize=14, fontweight='bold',
+        )
+        plt.tight_layout()
+
+        out_name = f"{save_prefix}_{sp_name}_{scale_label}.png"
+        plt.savefig(out_name, dpi=150)
+        print(f"\nPlot saved to {out_name}")
+        return fig
+
+    fig_linear = _make_figure(log_cells=False)
+    fig_log = _make_figure(log_cells=True)
+
+    if SHOW_PLOTS:
+        try:
+            plt.show()
+        except RuntimeError as exc:
+            print(f"Plot display warning (GUI backend): {exc}")
+
+    plt.close(fig_linear)
+    plt.close(fig_log)
 
 
 def main():
@@ -486,6 +552,9 @@ def main():
         final_Q = results['q_cells'][-1]
         final_Y = results['y_cells'][-1]
         iae = np.sum(np.abs(results['errors'])) * DT
+        therapeutic_pct = 100 * np.mean(results['in_therapeutic_band'])
+        toxicity_viol_pct = 100 * np.mean(results['toxicity_violation'])
+        y_viol_pct = 100 * np.mean(results['y_safety_violation'])
 
         print(f"\n  Summary for {sp_name} (set point = {SET_POINTS[sp_name]}):")
         print(f"    Final drug conc  : {final_D:.4f} mg/ml")
@@ -494,6 +563,9 @@ def main():
         print(f"    Final Q cells    : {final_Q:.4e}")
         print(f"    Final Y cells    : {final_Y:.4e}")
         print(f"    IAE              : {iae:.4f}")
+        print(f"    In therapeutic band (10-50 mg/ml): {therapeutic_pct:6.2f}%")
+        print(f"    Toxicity violation time (T > {T_MAX:.0f}) : {toxicity_viol_pct:6.2f}%")
+        print(f"    Normal-cell safety violation (Y < {Y_MIN_SAFE:.1e}): {y_viol_pct:6.2f}%")
         print()
 
 

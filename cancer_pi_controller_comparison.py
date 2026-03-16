@@ -22,12 +22,24 @@ import time
 sys.path.append(os.path.join(os.path.dirname(__file__), "src"))
 
 import numpy as np
+# Use a non-GUI backend by default to avoid Tkinter shutdown errors.
+import matplotlib
+
+
+def _env_flag(name, default="0"):
+    return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
+
+
+SHOW_PLOTS = _env_flag("CANCER_SHOW_PLOTS", "0")
+if not SHOW_PLOTS:
+    matplotlib.use("Agg")
+
 import matplotlib.pyplot as plt
 from QFIE.FuzzyEngines import QuantumFuzzyEngine, trimf, trapmf
 from QFIE.ClassicalFuzzyEngine import ClassicalFuzzyEngine
 from cancer_pi_controller_simulation import (
     CancerPatientModel, PARAMS, SET_POINTS, D_MIN, D_MAX, T_MAX,
-    SIM_DAYS, DT,
+    THERAPEUTIC_D_MIN, Y_MIN_SAFE, DOSAGE_MAX, SIM_DAYS, DT,
 )
 
 
@@ -37,7 +49,7 @@ from cancer_pi_controller_simulation import (
 
 ERROR_UNIVERSE    = np.linspace(-15, 15, 200)
 INTEGRAL_UNIVERSE = np.linspace(-50, 50, 200)
-DOSAGE_UNIVERSE   = np.linspace(0, 15, 200)
+DOSAGE_UNIVERSE   = np.linspace(-4, 4, 200)
 
 ERROR_SETS = [
     trapmf(ERROR_UNIVERSE, [-15, -15, -8, -3]),    # NB
@@ -56,48 +68,48 @@ INTEGRAL_SETS = [
 ]
 
 DOSAGE_SETS = [
-    trapmf(DOSAGE_UNIVERSE, [0, 0, 1.5, 3]),         # VL
-    trimf(DOSAGE_UNIVERSE,  [1.5, 3.75, 6]),          # LO
-    trimf(DOSAGE_UNIVERSE,  [4.5, 7.5, 10.5]),        # ME
-    trimf(DOSAGE_UNIVERSE,  [9, 11.25, 13.5]),        # HI
-    trapmf(DOSAGE_UNIVERSE, [12, 13.5, 15, 15]),      # VH
+    trapmf(DOSAGE_UNIVERSE, [-4, -4, -2.4, -1.2]),
+    trimf(DOSAGE_UNIVERSE,  [-2.0, -1.0, 0.0]),
+    trimf(DOSAGE_UNIVERSE,  [-0.5, 0.0, 0.5]),
+    trimf(DOSAGE_UNIVERSE,  [0.0, 1.0, 2.0]),
+    trapmf(DOSAGE_UNIVERSE, [1.2, 2.4, 4, 4]),
 ]
 
 ERROR_NAMES    = ["NB", "NS", "ZE", "PS", "PB"]
 INTEGRAL_NAMES = ["NB", "NS", "ZE", "PS", "PB"]
-DOSAGE_NAMES   = ["VL", "LO", "ME", "HI", "VH"]
+DOSAGE_NAMES   = ["NB", "NS", "ZE", "PS", "PB"]
 
 RULES = [
     # error NB
-    'if error is NB and integral is NB then dosage is VL',
-    'if error is NB and integral is NS then dosage is VL',
-    'if error is NB and integral is ZE then dosage is VL',
-    'if error is NB and integral is PS then dosage is LO',
-    'if error is NB and integral is PB then dosage is LO',
+    'if error is NB and integral is NB then dosage is NB',
+    'if error is NB and integral is NS then dosage is NB',
+    'if error is NB and integral is ZE then dosage is NB',
+    'if error is NB and integral is PS then dosage is NS',
+    'if error is NB and integral is PB then dosage is ZE',
     # error NS
-    'if error is NS and integral is NB then dosage is VL',
-    'if error is NS and integral is NS then dosage is LO',
-    'if error is NS and integral is ZE then dosage is LO',
-    'if error is NS and integral is PS then dosage is ME',
-    'if error is NS and integral is PB then dosage is ME',
+    'if error is NS and integral is NB then dosage is NB',
+    'if error is NS and integral is NS then dosage is NS',
+    'if error is NS and integral is ZE then dosage is NS',
+    'if error is NS and integral is PS then dosage is ZE',
+    'if error is NS and integral is PB then dosage is PS',
     # error ZE
-    'if error is ZE and integral is NB then dosage is LO',
-    'if error is ZE and integral is NS then dosage is ME',
-    'if error is ZE and integral is ZE then dosage is ME',
-    'if error is ZE and integral is PS then dosage is ME',
-    'if error is ZE and integral is PB then dosage is HI',
+    'if error is ZE and integral is NB then dosage is NB',
+    'if error is ZE and integral is NS then dosage is NS',
+    'if error is ZE and integral is ZE then dosage is ZE',
+    'if error is ZE and integral is PS then dosage is PS',
+    'if error is ZE and integral is PB then dosage is PB',
     # error PS
-    'if error is PS and integral is NB then dosage is ME',
-    'if error is PS and integral is NS then dosage is ME',
-    'if error is PS and integral is ZE then dosage is HI',
-    'if error is PS and integral is PS then dosage is HI',
-    'if error is PS and integral is PB then dosage is VH',
+    'if error is PS and integral is NB then dosage is NS',
+    'if error is PS and integral is NS then dosage is ZE',
+    'if error is PS and integral is ZE then dosage is PS',
+    'if error is PS and integral is PS then dosage is PS',
+    'if error is PS and integral is PB then dosage is PB',
     # error PB
-    'if error is PB and integral is NB then dosage is HI',
-    'if error is PB and integral is NS then dosage is HI',
-    'if error is PB and integral is ZE then dosage is VH',
-    'if error is PB and integral is PS then dosage is VH',
-    'if error is PB and integral is PB then dosage is VH',
+    'if error is PB and integral is NB then dosage is ZE',
+    'if error is PB and integral is NS then dosage is PS',
+    'if error is PB and integral is ZE then dosage is PB',
+    'if error is PB and integral is PS then dosage is PB',
+    'if error is PB and integral is PB then dosage is PB',
 ]
 
 
@@ -161,22 +173,24 @@ def run_simulation(engine, engine_type, set_point, days=SIM_DAYS, dt=DT, n_shots
 
         # Accumulate integral
         integral_error += error * dt
+        integral_error = float(np.clip(integral_error, -50, 50))
         safe_error = float(np.clip(error, -15, 15))
-        safe_integral = float(np.clip(integral_error, -50, 50))
+        safe_integral = integral_error
         crisp_inputs = {'error': safe_error, 'integral': safe_integral}
 
         t0 = time.perf_counter()
 
         if engine_type == 'quantum':
             engine.build_inference_qc(crisp_inputs, draw_qc=False, distributed=False)
-            dosage, _ = engine.execute(n_shots=n_shots)
+            delta_dose, _ = engine.execute(n_shots=n_shots)
         else:
-            dosage, _ = engine.infer(crisp_inputs)
+            delta_dose, _ = engine.infer(crisp_inputs)
 
         t1 = time.perf_counter()
         step_times[t] = t1 - t0
 
-        dosage = float(np.clip(dosage, 0, 15))
+        dosage = PARAMS['theta'] * set_point + float(delta_dose)
+        dosage = float(np.clip(dosage, 0, DOSAGE_MAX))
 
         # Advance plant model
         model.step(dosage, dt)
@@ -233,6 +247,9 @@ def compute_metrics(results, set_point, dt):
     # Average and final toxicity
     avg_toxicity = np.mean(toxicity)
     final_toxicity = toxicity[-1]
+    therapeutic_band_pct = 100 * np.mean((drug_conc >= THERAPEUTIC_D_MIN) & (drug_conc <= D_MAX))
+    toxicity_violation_pct = 100 * np.mean(toxicity > T_MAX)
+    y_safety_violation_pct = 100 * np.mean(results['y_cells'] < Y_MIN_SAFE)
 
     return {
         'IAE': iae, 'ISE': ise, 'ITAE': itae,
@@ -240,6 +257,9 @@ def compute_metrics(results, set_point, dt):
         'overshoot': overshoot, 'overshoot_pct': overshoot_pct,
         'TV': tv,
         'avg_toxicity': avg_toxicity, 'final_toxicity': final_toxicity,
+        'therapeutic_band_pct': therapeutic_band_pct,
+        'toxicity_violation_pct': toxicity_violation_pct,
+        'y_safety_violation_pct': y_safety_violation_pct,
         'final_P': results['p_cells'][-1],
         'final_Q': results['q_cells'][-1],
         'final_Y': results['y_cells'][-1],
@@ -297,6 +317,9 @@ def main():
     print(f"{'Settling Time (days, ±2%)':<40} {c_met['settling_time']:>15.2f} {q_met['settling_time']:>15.2f}")
     print(f"{'Overshoot (%)':<40} {c_met['overshoot_pct']:>15.4f} {q_met['overshoot_pct']:>15.4f}")
     print(f"{'Control Signal TV':<40} {c_met['TV']:>15.4f} {q_met['TV']:>15.4f}")
+    print(f"{'Therapeutic Band Time (%)':<40} {c_met['therapeutic_band_pct']:>15.2f} {q_met['therapeutic_band_pct']:>15.2f}")
+    print(f"{'Toxicity Violation Time (%)':<40} {c_met['toxicity_violation_pct']:>15.2f} {q_met['toxicity_violation_pct']:>15.2f}")
+    print(f"{'Normal-cell Safety Violation (%)':<40} {c_met['y_safety_violation_pct']:>15.2f} {q_met['y_safety_violation_pct']:>15.2f}")
     print(f"{'Avg Toxicity':<40} {c_met['avg_toxicity']:>15.4f} {q_met['avg_toxicity']:>15.4f}")
     print(f"{'Final Toxicity':<40} {c_met['final_toxicity']:>15.4f} {q_met['final_toxicity']:>15.4f}")
     print(f"{'Final P cells':<40} {c_met['final_P']:>15.4e} {q_met['final_P']:>15.4e}")
@@ -433,7 +456,35 @@ def main():
     plt.tight_layout()
     plt.savefig("cancer_pi_controller_comparison_results.png", dpi=150)
     print(f"\nPlot saved to cancer_pi_controller_comparison_results.png")
-    plt.show()
+    if SHOW_PLOTS:
+        try:
+            plt.show()
+        except RuntimeError as exc:
+            print(f"Plot display warning (GUI backend): {exc}")
+    else:
+        plt.close(fig)
+
+    # Log-scale view for cell-population analysis
+    fig_log, ax_log = plt.subplots(1, 1, figsize=(10, 6))
+    ax_log.plot(time_axis, np.maximum(c_res['p_cells'], 1.0), linewidth=2, label='P (Classical)', color='royalblue')
+    ax_log.plot(time_axis, np.maximum(q_res['p_cells'], 1.0), linewidth=2, label='P (Quantum)', color='crimson', linestyle='--')
+    ax_log.plot(time_axis, np.maximum(c_res['q_cells'], 1.0), linewidth=1.5, label='Q (Classical)', color='steelblue', linestyle='-.')
+    ax_log.plot(time_axis, np.maximum(q_res['q_cells'], 1.0), linewidth=1.5, label='Q (Quantum)', color='indianred', linestyle=':')
+    ax_log.set_yscale('log')
+    ax_log.set_title('Cancer Cell Populations (Log Scale)')
+    ax_log.set_xlabel('Time (days)')
+    ax_log.set_ylabel('Cell Count (log scale)')
+    ax_log.legend(fontsize=9)
+    ax_log.grid(True, alpha=0.3, which='both')
+    plt.tight_layout()
+    plt.savefig("cancer_pi_controller_comparison_cells_log.png", dpi=150)
+    print("Plot saved to cancer_pi_controller_comparison_cells_log.png")
+    if SHOW_PLOTS:
+        try:
+            plt.show()
+        except RuntimeError as exc:
+            print(f"Plot display warning (GUI backend): {exc}")
+    plt.close(fig_log)
 
     # ── Bar chart comparison (like paper's Fig. 24/25) ───────────────
     fig2, axes2 = plt.subplots(1, 3, figsize=(15, 5))
@@ -476,7 +527,12 @@ def main():
     plt.tight_layout()
     plt.savefig("cancer_pi_controller_comparison_bars.png", dpi=150)
     print(f"Bar chart saved to cancer_pi_controller_comparison_bars.png")
-    plt.show()
+    if SHOW_PLOTS:
+        try:
+            plt.show()
+        except RuntimeError as exc:
+            print(f"Plot display warning (GUI backend): {exc}")
+    plt.close(fig2)
 
 
 if __name__ == "__main__":

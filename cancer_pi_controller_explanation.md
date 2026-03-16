@@ -20,7 +20,7 @@ The paper uses a **two-compartment cancer patient model** (Fig. 2 of the paper) 
 | **Q(t)** | Quiescent cancer cells | 8 × 10¹¹ |
 | **D(t)** | Drug concentration (mg/ml) — *controlled variable* | 0 |
 | **T(t)** | Toxicity level (mg Day⁻¹/ml) | 0 |
-| **Y(t)** | Normal (healthy) cell count | 10⁶ |
+| **Y(t)** | Normal (healthy) cell count affected | 10⁸ |
 
 ### Governing Equations
 
@@ -43,16 +43,17 @@ Where `r(t) = a · D(t)` is the cell death rate proportional to drug concentrati
 | l | Rate cells stop multiplying | 0.4770 day⁻¹ |
 | x | Rate Q cells change into P cells | 0.050 day⁻¹ |
 | σ | Speed at which normal cells grow | 0.10 day⁻¹ |
-| N | Normal cells' holding capacity | 10⁷ |
+| N | Normal cells' holding capacity | 10⁹ |
 | θ | Decay of drugs | 0.270 day⁻¹ |
-| a | Cell death rate per unit drug | 8.40 × 10⁵ day⁻¹ |
+| a | Cell death rate per unit drug | 8.40 × 10⁻³ day⁻¹ |
 | β | Rate of removing toxins | 0.40 |
 
 ### Constraints
 
-- Drug concentration: `10 ≤ D(t) ≤ 50`
+- Drug concentration hard bound: `0 ≤ D(t) ≤ 50`
+- Therapeutic target band: `10 ≤ D(t) ≤ 50`
 - Toxicity bound: `T(t) ≤ 100`
-- Normal cells must stay within safe bounds during treatment
+- Normal-cell safety threshold: `Y(t) ≥ 10⁶`
 
 ---
 
@@ -93,7 +94,8 @@ Optimized parameters: **ψ = −0.0220**, **Kp = 0.9392**, **Ki = 0.2703**
 We replace the PI^λ component with a **QFIE-based fuzzy PI controller** that:
 
 1. Takes two inputs: **error** (set_point − D) and **integral of error**
-2. Uses 25 fuzzy rules (5×5 rule table) to determine the drug dosage
+2. Uses 25 fuzzy rules (5×5 rule table) to determine a **dose adjustment** Δu
+3. Adds feedforward equilibrium dose `u_eq = θ · D_ref` and applies `u = u_eq + Δu`
 3. Executes inference on a quantum circuit via the QFIE
 
 This approach offers:
@@ -125,15 +127,15 @@ This approach offers:
 | PS | [0, 8, 20] | Triangular |
 | PB | [8, 25, 50, 50] | Trapezoidal |
 
-### Output: Drug Dosage u(t)
+### Output: Dose Adjustment Δu(t)
 
 | Set | Range | Shape |
 |-----|-------|-------|
-| VL (Very Low) | [0, 0, 1.5, 3] | Trapezoidal |
-| LO (Low) | [1.5, 3.75, 6] | Triangular |
-| ME (Medium) | [4.5, 7.5, 10.5] | Triangular |
-| HI (High) | [9, 11.25, 13.5] | Triangular |
-| VH (Very High) | [12, 13.5, 15, 15] | Trapezoidal |
+| NB | [−4, −4, −2.4, −1.2] | Trapezoidal |
+| NS | [−2, −1, 0] | Triangular |
+| ZE | [−0.5, 0, 0.5] | Triangular |
+| PS | [0, 1, 2] | Triangular |
+| PB | [1.2, 2.4, 4, 4] | Trapezoidal |
 
 ### Rule Table (25 Rules)
 
@@ -235,8 +237,9 @@ uv run python cancer_pi_controller_comparison.py
 | IFOIMC PI^λ controller | Replaced with QFIE-based Fuzzy PI |
 | Kp = 0.9392, Ki = 0.2703 | Embedded in fuzzy rule table design |
 | Set points S₁, S₂, S₃ | Identical: 12.08, 12.17, 11.66 mg/ml |
-| Drug bounds [10, 50] | Enforced via clipping |
+| Drug hard bounds [0, 50] and therapeutic band [10, 50] | Hard bounds clipped, therapeutic-band compliance reported |
 | Toxicity bound T ≤ 100 | Enforced in model |
+| Normal-cell safety threshold Y ≥ 10⁶ | Violation percentage reported |
 | Performance metrics (IAE, ISE, TV) | Computed in comparison script |
 | Controller comparison (Table 3, Figs. 14–25) | Classical vs Quantum fuzzy comparison |
 
