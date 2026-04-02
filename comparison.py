@@ -10,16 +10,13 @@ Runs both controllers on the same scenario, measures:
 Produces a side-by-side plot and prints a summary table.
 """
 
-import sys
 import os
 import time
 
-sys.path.append(os.path.join(os.path.dirname(__file__), "src"))
-
 import numpy as np
 import matplotlib.pyplot as plt
-from QFIE.FuzzyEngines import QuantumFuzzyEngine, trimf, trapmf
-from QFIE.ClassicalFuzzyEngine import ClassicalFuzzyEngine
+from src.QFIE.FuzzyEngines import QuantumFuzzyEngine, trimf, trapmf
+from src.QFIE.ClassicalFuzzyEngine import ClassicalFuzzyEngine
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

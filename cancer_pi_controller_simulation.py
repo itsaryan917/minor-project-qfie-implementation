@@ -25,10 +25,7 @@ Approximated as first-order with delay for simulation:
     K = 3.7, T = 3.4, L = 0.005
 """
 
-import sys
 import os
-
-sys.path.append(os.path.join(os.path.dirname(__file__), "src"))
 
 import numpy as np
 # Use a non-GUI backend by default on Windows/terminal runs to avoid
@@ -40,12 +37,19 @@ def _env_flag(name, default="0"):
     return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_int(name, default):
+    try:
+        return int(os.getenv(name, str(default)).strip())
+    except (TypeError, ValueError):
+        return int(default)
+
+
 SHOW_PLOTS = _env_flag("CANCER_SHOW_PLOTS", "0")
 if not SHOW_PLOTS:
     matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
-from QFIE.FuzzyEngines import QuantumFuzzyEngine, trimf, trapmf
+from src.QFIE.FuzzyEngines import QuantumFuzzyEngine, trimf, trapmf
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -81,7 +85,7 @@ KI_NOMINAL = 0.2703     # Integral gain
 
 # Set points for drug concentration (mg/ml)
 SET_POINTS = {
-    'S1': 12.08,
+    'S1': 20.00,
     'S2': 12.17,
     'S3': 11.66,
 }
@@ -103,6 +107,7 @@ Y_MIN_SAFE = PARAMS['Y_MIN']
 # Simulation
 SIM_DAYS = 100          # Total treatment duration (days)
 DT = 0.1               # Time step (days)
+QFIE_SHOTS = _env_int("CANCER_QFIE_SHOTS", 128)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -177,7 +182,7 @@ class CancerPatientModel:
         self.Q = max(0, Q + dQ * dt)
         self.D = np.clip(D + dD * dt, D_MIN, D_MAX)
         self.T = np.clip(T + dT * dt, 0, T_MAX)
-        self.Y = np.clip(Y + dY * dt, 0, self.N)
+        self.Y = np.clip(Y + dY * dt, self.y_min, self.N)
 
         return self.D
 
@@ -194,8 +199,9 @@ class QuantumFuzzyPIController:
     fuzzy inference engine.
     """
 
-    def __init__(self):
+    def __init__(self, n_shots=QFIE_SHOTS):
         self.qfie = QuantumFuzzyEngine(verbose=False, encoding='linear')
+        self.n_shots = max(1, int(n_shots))
 
         # ── Universes of Discourse ───────────────────────────────────
         # Error: difference between desired and actual drug concentration
@@ -328,7 +334,7 @@ class QuantumFuzzyPIController:
         }
 
         self.qfie.build_inference_qc(crisp_inputs, draw_qc=False, distributed=False)
-        delta_dose, _ = self.qfie.execute(n_shots=1024)
+        delta_dose, _ = self.qfie.execute(n_shots=self.n_shots)
 
         # dD/dt = u - theta*D => equilibrium feedforward u_eq = theta * D_ref
         u_eq = PARAMS['theta'] * set_point
@@ -372,11 +378,12 @@ def run_quantum_fuzzy_pi_simulation(set_point_name='S1', days=SIM_DAYS, dt=DT):
     print(f"  Duration         : {days} days")
     print(f"  Time step        : {dt} days")
     print(f"  Total steps      : {steps}")
+    print(f"  Quantum shots    : {QFIE_SHOTS}")
     print(f"{'='*65}\n")
 
     # Initialize
     model = CancerPatientModel()
-    controller = QuantumFuzzyPIController()
+    controller = QuantumFuzzyPIController(n_shots=QFIE_SHOTS)
 
     # Storage
     time_axis = np.zeros(steps)

@@ -15,7 +15,7 @@ Only the rule evaluation differs:
 """
 
 import numpy as np
-from QFIE.FuzzyEngines import trimf, trapmf   # reuse the same MF helpers
+from .FuzzyEngines import trimf, trapmf   # reuse the same MF helpers
 
 
 class ClassicalFuzzyEngine:

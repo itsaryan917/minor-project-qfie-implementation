@@ -16,17 +16,14 @@ This is a standard methodology used in quantum computing research
 to project quantum advantage before hardware is available at scale.
 """
 
-import sys
 import os
 import time
 import random
 
-sys.path.append(os.path.join(os.path.dirname(__file__), "src"))
-
 import numpy as np
 import matplotlib.pyplot as plt
-from QFIE.FuzzyEngines import QuantumFuzzyEngine, trimf, trapmf
-from QFIE.ClassicalFuzzyEngine import ClassicalFuzzyEngine
+from src.QFIE.FuzzyEngines import QuantumFuzzyEngine, trimf, trapmf
+from src.QFIE.ClassicalFuzzyEngine import ClassicalFuzzyEngine
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

@@ -15,11 +15,8 @@ on the same cancer patient model, measuring:
 Produces side-by-side comparison plots and a summary table.
 """
 
-import sys
 import os
 import time
-
-sys.path.append(os.path.join(os.path.dirname(__file__), "src"))
 
 import numpy as np
 # Use a non-GUI backend by default to avoid Tkinter shutdown errors.
@@ -30,13 +27,20 @@ def _env_flag(name, default="0"):
     return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_int(name, default):
+    try:
+        return int(os.getenv(name, str(default)).strip())
+    except (TypeError, ValueError):
+        return int(default)
+
+
 SHOW_PLOTS = _env_flag("CANCER_SHOW_PLOTS", "0")
 if not SHOW_PLOTS:
     matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
-from QFIE.FuzzyEngines import QuantumFuzzyEngine, trimf, trapmf
-from QFIE.ClassicalFuzzyEngine import ClassicalFuzzyEngine
+from src.QFIE.FuzzyEngines import QuantumFuzzyEngine, trimf, trapmf
+from src.QFIE.ClassicalFuzzyEngine import ClassicalFuzzyEngine
 from cancer_pi_controller_simulation import (
     CancerPatientModel, PARAMS, SET_POINTS, D_MIN, D_MAX, T_MAX,
     THERAPEUTIC_D_MIN, Y_MIN_SAFE, DOSAGE_MAX, SIM_DAYS, DT,
@@ -275,7 +279,7 @@ def compute_metrics(results, set_point, dt):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def main():
-    N_SHOTS = 1024
+    N_SHOTS = _env_int("CANCER_QFIE_SHOTS", 128)
     SP_NAME = 'S1'              # Primary comparison set point
     SP = SET_POINTS[SP_NAME]
 

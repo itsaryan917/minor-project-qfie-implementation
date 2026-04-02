@@ -53,7 +53,7 @@ Where `r(t) = a · D(t)` is the cell death rate proportional to drug concentrati
 - Drug concentration hard bound: `0 ≤ D(t) ≤ 50`
 - Therapeutic target band: `10 ≤ D(t) ≤ 50`
 - Toxicity bound: `T(t) ≤ 100`
-- Normal-cell safety threshold: `Y(t) ≥ 10⁶`
+- Normal-cell safety threshold: `Y(t) ≥ 10⁶` (hard-enforced in model state update)
 
 ---
 
@@ -239,7 +239,7 @@ uv run python cancer_pi_controller_comparison.py
 | Set points S₁, S₂, S₃ | Identical: 12.08, 12.17, 11.66 mg/ml |
 | Drug hard bounds [0, 50] and therapeutic band [10, 50] | Hard bounds clipped, therapeutic-band compliance reported |
 | Toxicity bound T ≤ 100 | Enforced in model |
-| Normal-cell safety threshold Y ≥ 10⁶ | Violation percentage reported |
+| Normal-cell safety threshold Y ≥ 10⁶ | Hard-enforced floor in model update; violation metric should remain 0% |
 | Performance metrics (IAE, ISE, TV) | Computed in comparison script |
 | Controller comparison (Table 3, Figs. 14–25) | Classical vs Quantum fuzzy comparison |
 

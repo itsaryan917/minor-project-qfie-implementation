@@ -17,15 +17,11 @@ The controller mirrors the inverted-pendulum structure from the
 reference implementation, adapted for vertical drone dynamics.
 """
 
-import sys
 import os
-
-# Ensure the local src/ package is importable
-sys.path.append(os.path.join(os.path.dirname(__file__), "src"))
 
 import numpy as np
 import matplotlib.pyplot as plt
-from QFIE.FuzzyEngines import QuantumFuzzyEngine, trimf, trapmf
+from src.QFIE.FuzzyEngines import QuantumFuzzyEngine, trimf, trapmf
 
 
 class DroneAltitudeController:

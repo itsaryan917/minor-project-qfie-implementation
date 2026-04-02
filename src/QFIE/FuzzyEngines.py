@@ -108,6 +108,7 @@ class QuantumFuzzyEngine:
         self._input_regs = {}
         self._output_reg = None
         self._output_cr = None
+        self._sampler = None
 
     # ------------------------------------------------------------------ #
     # Variable & fuzzy-set registration
@@ -290,8 +291,10 @@ class QuantumFuzzyEngine:
         """
         from qiskit.primitives import StatevectorSampler
 
-        sampler = StatevectorSampler()
-        job = sampler.run([self._qc], shots=n_shots)
+        if self._sampler is None:
+            self._sampler = StatevectorSampler()
+
+        job = self._sampler.run([self._qc], shots=n_shots)
         result = job.result()
 
         # Retrieve counts for the 'out' classical register
